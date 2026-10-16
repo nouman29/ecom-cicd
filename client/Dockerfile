@@ -13,7 +13,9 @@ RUN npm install
 # Copy the rest of the client code
 COPY . .
 
-RUN mv .env.example .env
+# API base URL baked into the bundle (relative by default: nginx proxies /api)
+ARG API_URL=/api
+ENV API_URL=$API_URL
 
 # Build the client for production
 RUN npm run build

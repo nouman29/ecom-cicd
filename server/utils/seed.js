@@ -11,8 +11,8 @@ const Product = require('../models/product');
 const Category = require('../models/category');
 
 const args = process.argv.slice(2);
-const email = args[0];
-const password = args[1];
+const email = args[0] || process.env.ADMIN_EMAIL;
+const password = args[1] || process.env.ADMIN_PASSWORD;
 
 const NUM_PRODUCTS = 100;
 const NUM_BRANDS = 10;

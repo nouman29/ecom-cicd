@@ -1,9 +1,10 @@
 export const API_URL = process.env.API_URL;
 
-export const SOCKET_URL =
-  window.location.host.indexOf('localhost') >= 0
-    ? 'http://127.0.0.1:3000'
-    : window.location.host;
+// Absolute API_URL (local dev) -> socket on the API's origin;
+// relative API_URL (Docker/production) -> same origin, proxied by nginx
+export const SOCKET_URL = /^https?:\/\//.test(API_URL)
+  ? new URL(API_URL).origin
+  : window.location.origin;
 
 export const ROLES = {
   Admin: 'ROLE ADMIN',
