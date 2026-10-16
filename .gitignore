@@ -11,6 +11,8 @@ package.json.bak
 
 # config file
 .env
+.env.*
+!.env.example
 
 # debug
 npm-debug.log*
