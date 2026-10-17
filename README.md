@@ -77,6 +77,8 @@ Create `.env` file for both client and server. See examples:
 
 Infrastructure (EC2, ECR repos, GitHub OIDC role) is created with Terraform from the separate `aws-infrastructure/` folder.
 
+Live: http://13.50.28.13:8080
+
 - **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): every pull request to `main` builds the client and server images.
 - **CD** ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)): every push to `main` builds both images, pushes them to ECR (tagged with the commit SHA and `latest`), SSHes to the EC2, writes `.env`, runs `docker compose -f docker-compose.prod.yml pull && up -d`, then smoke-tests `/api/category/list`.
 
