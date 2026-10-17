@@ -20,12 +20,8 @@ class MerchantSignup extends React.PureComponent {
   }
 
   render() {
-    const {
-      signupFormData,
-      formErrors,
-      merchantSignupChange,
-      merchantSignUp
-    } = this.props;
+    const { signupFormData, formErrors, merchantSignupChange, merchantSignUp } =
+      this.props;
 
     const handleSubmit = event => {
       const token = this.props.match.params.token;

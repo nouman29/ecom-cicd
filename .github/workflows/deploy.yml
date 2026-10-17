@@ -1,6 +1,6 @@
 name: CD
 
-# main → build images → push to ECR → SSH deploy on EC2 → smoke test
+# main → CI gates → build images → push to ECR → SSH deploy on EC2 → smoke test
 on:
   push:
     branches: [main]
@@ -21,8 +21,13 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   build-push:
     name: Build & push ${{ matrix.service }}
+    needs: ci
     runs-on: ubuntu-latest
     strategy:
       matrix:

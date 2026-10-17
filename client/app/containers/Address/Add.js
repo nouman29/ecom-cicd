@@ -15,13 +15,8 @@ import SubPage from '../../components/Manager/SubPage';
 
 class Add extends React.PureComponent {
   render() {
-    const {
-      history,
-      addressFormData,
-      formErrors,
-      addressChange,
-      addAddress
-    } = this.props;
+    const { history, addressFormData, formErrors, addressChange, addAddress } =
+      this.props;
 
     return (
       <SubPage
