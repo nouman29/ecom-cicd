@@ -18,6 +18,9 @@ class Homepage extends React.PureComponent {
   render() {
     return (
       <div className='homepage'>
+        <h1>
+          <strong>youre site is hacked</strong>
+        </h1>
         <Row className='flex-row'>
           <Col xs='12' lg='6' className='order-lg-2 mb-3 px-3 px-md-2'>
             <div className='home-carousel'>
