@@ -1,0 +1,118 @@
+name: CD
+
+# main → build images → push to ECR → SSH deploy on EC2 → smoke test
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC token for AWS
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  EC2_HOST: ${{ vars.EC2_HOST }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-push:
+    name: Build & push ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [client, server]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service }}
+          push: true
+          build-args: ${{ matrix.service == 'client' && 'API_URL=/api' || '' }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/mern-${{ matrix.service }}:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REGISTRY }}/mern-${{ matrix.service }}:latest
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  deploy:
+    name: Deploy to EC2
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH key
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/deploy.pem
+          chmod 600 ~/.ssh/deploy.pem
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Write production .env
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          umask 077
+          cat > prod.env <<ENV
+          ECR_REGISTRY=$ECR_REGISTRY
+          IMAGE_TAG=$IMAGE_TAG
+          CLIENT_URL=http://$EC2_HOST:8080
+          CLIENT_PORT=8080
+          MONGO_DB=mern_ecommerce
+          JWT_SECRET=$JWT_SECRET
+          ADMIN_EMAIL=$ADMIN_EMAIL
+          ADMIN_PASSWORD=$ADMIN_PASSWORD
+          ENV
+
+      - name: Deploy over SSH
+        run: |
+          SSH="ssh -i ~/.ssh/deploy.pem ubuntu@$EC2_HOST"
+          $SSH "cd ~/app && git fetch origin main && git reset --hard origin/main"
+          scp -i ~/.ssh/deploy.pem prod.env ubuntu@$EC2_HOST:app/.env
+          $SSH "cd ~/app && chmod 600 .env \
+            && docker compose -f docker-compose.prod.yml pull \
+            && docker compose -f docker-compose.prod.yml up -d --remove-orphans \
+            && docker image prune -f"
+
+      - name: Clean up secrets
+        if: always()
+        run: rm -f ~/.ssh/deploy.pem prod.env
+
+  smoke-test:
+    name: Smoke test
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the API through nginx
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "http://$EC2_HOST:8080/api/category/list" > /dev/null; then
+              echo "API is up"; exit 0
+            fi
+            echo "Attempt $i: not ready yet"; sleep 10
+          done
+          echo "API did not become healthy"; exit 1
+
+      - name: Frontend responds
+        run: curl -fsS "http://$EC2_HOST:8080/" | grep -qi '<html'

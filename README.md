@@ -73,6 +73,28 @@ Create `.env` file for both client and server. See examples:
 [Backend ENV](server/.env.example)
 
 
+## AWS Deployment (EC2 + ECR + GitHub Actions)
+
+Infrastructure (EC2, ECR repos, GitHub OIDC role) is created with Terraform from the separate `aws-infrastructure/` folder.
+
+- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): every pull request to `main` builds the client and server images.
+- **CD** ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)): every push to `main` builds both images, pushes them to ECR (tagged with the commit SHA and `latest`), SSHes to the EC2, writes `.env`, runs `docker compose -f docker-compose.prod.yml pull && up -d`, then smoke-tests `/api/category/list`.
+
+The EC2 runs client (nginx, port 8080), server and MongoDB from [docker-compose.prod.yml](docker-compose.prod.yml); it never builds images.
+
+Required repository settings (Settings → Secrets and variables → Actions):
+
+| Type | Name | Value |
+| --- | --- | --- |
+| Variable | `AWS_REGION` | `eu-north-1` |
+| Variable | `AWS_ROLE_ARN` | `terraform output github_actions_role_arn` |
+| Variable | `ECR_REGISTRY` | `terraform output ecr_registry` |
+| Variable | `EC2_HOST` | `terraform output elastic_ip` |
+| Secret | `EC2_SSH_KEY` | Private key of the EC2 key pair |
+| Secret | `JWT_SECRET` | `openssl rand -hex 32` |
+| Secret | `ADMIN_EMAIL` | Admin account created by the seed |
+| Secret | `ADMIN_PASSWORD` | Admin account password |
+
 ## Vercel Deployment
 
 Both frontend and backend are deployed on Vercel from the same repository. When deploying on Vercel, make sure to specifiy the root directory as `client` and `server` when importing the repository. See [client vercel.json](client/vercel.json) and [server vercel.json](server/vercel.json).
