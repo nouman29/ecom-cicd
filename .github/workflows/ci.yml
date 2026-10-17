@@ -1,16 +1,30 @@
 name: CI
 
-# Build both images on every pull request so broken builds never reach main
+# Quality gates: runs on pull requests, and is called by CD before every deploy
 on:
   pull_request:
     branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build ${{ matrix.service }}
+  lint:
+    name: Lint (Prettier)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check formatting
+        run: npx -y prettier@2.8.8 --check "server/**/*.js" "client/app/**/*.js"
+
+  audit:
+    name: Dependency audit (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -19,13 +33,70 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build image (no push)
-        uses: docker/build-push-action@v6
+      - uses: actions/setup-node@v4
         with:
-          context: ${{ matrix.service }}
-          push: false
-          build-args: ${{ matrix.service == 'client' && 'API_URL=/api' || '' }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          node-version: 20
+
+      # Report-only: the app pins old dependencies with known advisories.
+      # Raise to a blocking gate once they are upgraded.
+      - name: npm audit (report only)
+        working-directory: ${{ matrix.service }}
+        run: |
+          npm audit --omit=dev --audit-level=critical > audit.txt || true
+          {
+            echo "### npm audit — ${{ matrix.service }}"
+            echo '```'
+            tail -n 5 audit.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  api-test:
+    name: Build & API integration test
+    runs-on: ubuntu-latest
+    env:
+      JWT_SECRET: ci-only-secret
+      ADMIN_EMAIL: ci-admin@example.com
+      ADMIN_PASSWORD: ci-only-password
+      CLIENT_URL: http://localhost:8080
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start the full stack (client, server, mongo)
+        run: docker compose up -d --build --wait --wait-timeout 300
+
+      - name: Frontend is served by nginx
+        run: curl -fsS http://localhost:8080/ | grep -qi '<html'
+
+      - name: Public API endpoints return seeded data
+        run: |
+          curl -fsS http://localhost:8080/api/category/list | jq -e '.categories | length > 0'
+          curl -fsS http://localhost:8080/api/brand/list | jq -e '.brands | length > 0'
+          curl -fsS 'http://localhost:8080/api/product/list?sortOrder=%7B%22_id%22%3A-1%7D&rating=0&max=2500&min=1&category=all&brand=all&page=1&limit=5' \
+            | jq -e '.products | length > 0'
+
+      - name: Admin login returns a JWT
+        run: |
+          curl -fsS -X POST http://localhost:8080/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" \
+            | jq -e '.success == true and (.token | startswith("Bearer ")) and .user.role == "ROLE ADMIN"'
+
+      - name: Wrong password is rejected
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"wrong\"}")
+          test "$code" = 400
+
+      - name: Server and MongoDB ports are not published
+        run: |
+          if curl -s --max-time 3 http://localhost:3000/ > /dev/null; then echo "3000 is exposed"; exit 1; fi
+          if (echo > /dev/tcp/127.0.0.1/27017) 2>/dev/null; then echo "27017 is exposed"; exit 1; fi
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --tail 100
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

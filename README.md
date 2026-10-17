@@ -79,8 +79,8 @@ Infrastructure (EC2, ECR repos, GitHub OIDC role) is created with Terraform from
 
 Live: http://13.50.28.13:8080
 
-- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): every pull request to `main` builds the client and server images.
-- **CD** ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)): every push to `main` builds both images, pushes them to ECR (tagged with the commit SHA and `latest`), SSHes to the EC2, writes `.env`, runs `docker compose -f docker-compose.prod.yml pull && up -d`, then smoke-tests `/api/category/list`.
+- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): runs on every pull request to `main` and before every deploy. Prettier lint, `npm audit` (report only), and an integration test that starts the full stack with Docker Compose and checks the frontend, public API, admin login, and that server/MongoDB ports stay private.
+- **CD** ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)): every push to `main` runs CI first, then builds both images, pushes them to ECR (tagged with the commit SHA and `latest`), SSHes to the EC2, writes `.env`, runs `docker compose -f docker-compose.prod.yml pull && up -d`, then smoke-tests `/api/category/list`.
 
 The EC2 runs client (nginx, port 8080), server and MongoDB from [docker-compose.prod.yml](docker-compose.prod.yml); it never builds images.
 
