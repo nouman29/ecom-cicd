@@ -1,6 +1,7 @@
 name: CD
 
-# main → CI gates → build images → push to ECR → SSH deploy on EC2 → smoke test
+# main → CI gates → Terraform plan → (approved) Terraform apply → read infra outputs
+#      → build images → push to ECR → SSH deploy on EC2 → smoke tests & health checks
 on:
   push:
     branches: [main]
@@ -16,22 +17,155 @@ concurrency:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-  EC2_HOST: ${{ vars.EC2_HOST }}
   IMAGE_TAG: ${{ github.sha }}
+  TF_VERSION: 1.16.5
+  TF_DIR: aws-infrastructure
 
 jobs:
   ci:
     name: CI
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write # requested by the CI Terraform job (only used on PRs)
+
+  infra-plan:
+    name: Terraform plan
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (read-only plan role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform plan
+        id: plan
+        run: |
+          terraform init -input=false
+          set +e
+          terraform plan -input=false -no-color -lock-timeout=5m -detailed-exitcode -out=tfplan > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          # 0 = no changes, 2 = changes, anything else = error
+          if [ "$code" = 1 ]; then exit 1; fi
+          echo "changes=$([ "$code" = 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Terraform plan"
+            grep -E '^(Plan:|No changes)' plan.txt || true
+            if [ "$code" = 2 ]; then
+              echo
+              echo "**Changes found — approve the \`production\` deployment to apply exactly this plan.**"
+            fi
+            echo '<details><summary>Full plan</summary>'
+            echo
+            echo '```'
+            sed -n '/Terraform will perform\|No changes\|will no longer be managed/,$p' plan.txt | head -c 60000
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan
+        if: steps.plan.outputs.changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}/tfplan
+          retention-days: 7
+
+  infra-apply:
+    name: Terraform apply (approval required)
+    needs: infra-plan
+    if: needs.infra-plan.outputs.changes == 'true'
+    runs-on: ubuntu-latest
+    # Required reviewers on this environment pause the job until someone approves
+    environment: production
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TF_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}
+
+      # Applies the reviewed plan file; fails if the state changed since it was made
+      - name: terraform apply
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -no-color -lock-timeout=5m tfplan
+
+  infra-outputs:
+    name: Read infrastructure outputs
+    needs: [infra-plan, infra-apply]
+    # Runs when apply succeeded or was not needed; a rejected/failed apply stops the deploy
+    if: ${{ !cancelled() && needs.infra-plan.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.infra-apply.result) }}
+    runs-on: ubuntu-latest
+    outputs:
+      ec2_host: ${{ steps.out.outputs.ec2_host }}
+      ecr_registry: ${{ steps.out.outputs.ecr_registry }}
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (read-only plan role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform output
+        id: out
+        run: |
+          terraform init -input=false
+          echo "ec2_host=$(terraform output -raw elastic_ip)" >> "$GITHUB_OUTPUT"
+          echo "ecr_registry=$(terraform output -raw ecr_registry)" >> "$GITHUB_OUTPUT"
 
   build-push:
     name: Build & push ${{ matrix.service }}
-    needs: ci
+    needs: infra-outputs
+    if: ${{ !cancelled() && needs.infra-outputs.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         service: [client, server]
+    env:
+      ECR_REGISTRY: ${{ needs.infra-outputs.outputs.ecr_registry }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,8 +194,12 @@ jobs:
 
   deploy:
     name: Deploy to EC2
-    needs: build-push
+    needs: [infra-outputs, build-push]
+    if: ${{ !cancelled() && needs.build-push.result == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      EC2_HOST: ${{ needs.infra-outputs.outputs.ec2_host }}
+      ECR_REGISTRY: ${{ needs.infra-outputs.outputs.ecr_registry }}
     steps:
       - name: Set up SSH key
         env:
@@ -105,9 +243,12 @@ jobs:
         run: rm -f ~/.ssh/deploy.pem prod.env
 
   smoke-test:
-    name: Smoke test
-    needs: deploy
+    name: Smoke tests & health checks
+    needs: [infra-outputs, deploy]
+    if: ${{ !cancelled() && needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      EC2_HOST: ${{ needs.infra-outputs.outputs.ec2_host }}
     steps:
       - name: Wait for the API through nginx
         run: |
@@ -126,3 +267,6 @@ jobs:
 
       - name: Frontend responds
         run: curl -fsS "http://$EC2_HOST:8080/" | grep -qi '<html'
+
+      - name: Summary
+        run: echo "### Live at http://$EC2_HOST:8080 (commit ${IMAGE_TAG::7})" >> "$GITHUB_STEP_SUMMARY"

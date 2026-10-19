@@ -73,29 +73,47 @@ Create `.env` file for both client and server. See examples:
 [Backend ENV](server/.env.example)
 
 
-## AWS Deployment (EC2 + ECR + GitHub Actions)
+## AWS Deployment (Terraform + EC2 + ECR + GitHub Actions)
 
-Infrastructure (EC2, ECR repos, GitHub OIDC role) is created with Terraform from the separate `aws-infrastructure/` folder.
+Live: http://13.48.221.4:8080 (health: `/api/health`)
 
-Live: http://13.50.28.13:8080
+```
+Push / open PR ─► CI: app lint, audit, integration test  +  Terraform fmt, validate, plan (posted on the PR)
+               ─► Review the code and the infrastructure plan
+               ─► Merge to protected main (PR + green checks required)
+               ─► CD: Terraform plan ─► approve `production` ─► Terraform apply   (only if infra changed)
+                      build images ─► push to ECR ─► deploy to EC2 over SSH
+               ─► Smoke tests & /api/health (must report this commit, DB connected)
+```
 
-- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): runs on every pull request to `main` and before every deploy. Prettier lint, `npm audit` (report only), and an integration test that starts the full stack with Docker Compose and checks the frontend, public API, admin login, and that server/MongoDB ports stay private.
-- **CD** ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)): every push to `main` runs CI first, then builds both images, pushes them to ECR (tagged with the commit SHA and `latest`), SSHes to the EC2, writes `.env`, runs `docker compose -f docker-compose.prod.yml pull && up -d`, then smoke-tests `/api/category/list`.
+- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): every pull request to `main`, and again inside CD. Prettier lint, `npm audit` (report only), a Docker Compose integration test (frontend, health, public API, admin login, private ports), and Terraform `fmt`/`validate`. On PRs it also runs `terraform plan` with a read-only role and posts the plan as a PR comment.
+- **CD** ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)): every push to `main`. Runs CI, then `terraform plan`. If the plan has changes, the **Terraform apply** job waits for approval in the `production` environment and applies exactly that plan file. The EC2 IP and ECR registry are read from `terraform output`, then images are built, pushed to ECR (commit SHA + `latest`), deployed with `docker compose -f docker-compose.prod.yml`, and smoke-tested. A rejected or failed apply stops the deploy.
 
-The EC2 runs client (nginx, port 8080), server and MongoDB from [docker-compose.prod.yml](docker-compose.prod.yml); it never builds images.
+### Infrastructure ([aws-infrastructure/](aws-infrastructure))
 
-Required repository settings (Settings → Secrets and variables → Actions):
+| Folder | Manages | Applied by |
+| --- | --- | --- |
+| `aws-infrastructure/` | EC2 + security group + Elastic IP, EC2 IAM role, ECR repos, `github-actions-ecr-push` role | CD, after approval |
+| `aws-infrastructure/bootstrap/` | S3 state bucket, GitHub OIDC provider, `ecom-cicd-terraform-plan` (read-only) and `ecom-cicd-terraform-apply` roles | By hand, once (`terraform apply` locally) |
+
+State is in S3 (`ecom-cicd-tfstate-<account>`, versioned, encrypted, S3-native locking). Bootstrap is kept out of CD so the pipeline cannot change its own permissions. The plan role can only be assumed by PRs and `main`; the apply role only by jobs in the `production` environment.
+
+The EC2 never builds images; it pulls them from ECR.
+
+Required repository settings (Settings → Secrets and variables → Actions, and Settings → Environments):
 
 | Type | Name | Value |
 | --- | --- | --- |
 | Variable | `AWS_REGION` | `eu-north-1` |
 | Variable | `AWS_ROLE_ARN` | `terraform output github_actions_role_arn` |
-| Variable | `ECR_REGISTRY` | `terraform output ecr_registry` |
-| Variable | `EC2_HOST` | `terraform output elastic_ip` |
+| Variable | `TF_PLAN_ROLE_ARN` | `terraform -chdir=bootstrap output terraform_plan_role_arn` |
+| Variable | `TF_APPLY_ROLE_ARN` | `terraform -chdir=bootstrap output terraform_apply_role_arn` |
 | Secret | `EC2_SSH_KEY` | Private key of the EC2 key pair |
 | Secret | `JWT_SECRET` | `openssl rand -hex 32` |
 | Secret | `ADMIN_EMAIL` | Admin account created by the seed |
 | Secret | `ADMIN_PASSWORD` | Admin account password |
+| Environment | `production` | Required reviewer; deployments from protected branches only |
+| Branch protection | `main` | PR required, CI checks must pass, applies to admins |
 
 ## Vercel Deployment
 
