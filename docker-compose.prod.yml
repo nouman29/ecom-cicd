@@ -25,6 +25,8 @@ services:
       - MONGO_URI=mongodb://mongo:27017/${MONGO_DB:-mern_ecommerce}
       - ADMIN_EMAIL=${ADMIN_EMAIL:?ADMIN_EMAIL must be set in .env}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}
+      # Reported by /api/health so you can see which commit is deployed
+      - APP_VERSION=${IMAGE_TAG:-latest}
     # Not published to the host: only reachable through the client's nginx proxy
     expose:
       - '3000'

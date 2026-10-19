@@ -67,6 +67,9 @@ jobs:
       - name: Frontend is served by nginx
         run: curl -fsS http://localhost:8080/ | grep -qi '<html'
 
+      - name: Health endpoint reports the database connected
+        run: curl -fsS http://localhost:8080/api/health | jq -e '.status == "ok" and .database == "connected"'
+
       - name: Public API endpoints return seeded data
         run: |
           curl -fsS http://localhost:8080/api/category/list | jq -e '.categories | length > 0'

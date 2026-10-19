@@ -119,5 +119,10 @@ jobs:
           done
           echo "API did not become healthy"; exit 1
 
+      - name: Health reports this commit with the database connected
+        run: |
+          curl -fsS "http://$EC2_HOST:8080/api/health" | tee health.json
+          jq -e --arg v "$IMAGE_TAG" '.status == "ok" and .database == "connected" and .version == $v' health.json
+
       - name: Frontend responds
         run: curl -fsS "http://$EC2_HOST:8080/" | grep -qi '<html'
